@@ -22,7 +22,6 @@ if __name__ == "__main__":
 import logging
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -54,23 +53,6 @@ from training.train_utils import (
 logger = logging.getLogger("train")
 
 VERBOSE_STEPS = 10  # log every step at the start of a run, then every log_freq
-
-
-@dataclass
-class Run:
-    """Everything the training loop needs, assembled before the first step."""
-
-    args: TrainArgs
-    model: nn.Module  # unwrapped, for EMA/checkpointing
-    wrapped: nn.Module  # DDP-wrapped when distributed, else the model itself
-    mimi: nn.Module
-    optimizer: torch.optim.Optimizer
-    ema: EMA | None
-    start_step: int
-    device: torch.device
-    rank: int
-    world_size: int
-    progress: ProgressLog
 
 
 def setup(config_path: str) -> Run:
@@ -218,6 +200,10 @@ def main(config_path: str) -> None:
             else:
                 scaled.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.optim.max_norm)
+        if not torch.isfinite(grad_norm):
+            # Stop before the NaN reaches the weights: the run would otherwise
+            # keep training and checkpointing garbage, and auto-resume reloads it.
+            raise SystemExit(f"non-finite gradient at step {step}; the latest checkpoint is sound")
         optimizer.step()
         if ema is not None:
             ema.update(model)
