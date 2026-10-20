@@ -2,7 +2,7 @@
 //! the voice states the Python package writes.
 
 use anyhow::{Context, Result, bail};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -144,14 +144,105 @@ fn remap_key(name: &str) -> Option<String> {
     Some(name)
 }
 
+/// The name in a `TTSModel` of a tensor of a separate flow LM checkpoint, as
+/// `get_flow_lm_state_dict` of `pocket_tts/utils/weights_loading.py` renames it.
+fn flow_lm_file_key(key: &str) -> Option<String> {
+    if key.starts_with("flow.w_s_t.")
+        || key == "condition_provider.conditioners.transcript_in_segment.learnt_padding"
+        || key == "condition_provider.conditioners.speaker_wavs.learnt_padding"
+        || key == "num_ema_updates"
+    {
+        return None;
+    }
+    let key = match key {
+        "condition_provider.conditioners.transcript_in_segment.embed.weight" => {
+            "conditioner.embed.weight"
+        }
+        "condition_provider.conditioners.speaker_wavs.output_proj.weight" => "speaker_proj_weight",
+        "fuser.padding_value" => "bos_before_voice",
+        key => key,
+    };
+    let key = key.replace(".self_attn.in_proj_weight", ".self_attn.in_proj.weight");
+    Some(format!("flow_lm.{key}"))
+}
+
+/// The checkpoint files of a config.
+#[derive(Debug, Clone, Default)]
+pub struct WeightFiles {
+    /// The `flow_lm.*` and `mimi.*` tensors of a `TTSModel`: the config's `weights_path`.
+    pub bundle: Option<PathBuf>,
+    /// The flow LM alone, without the `flow_lm.` prefix: `flow_lm.weights_path`, used without a
+    /// bundle only, as the bundle's flow LM would replace it.
+    pub flow_lm: Option<PathBuf>,
+    /// The `mimi.*` tensors of a `TTSModel`, replacing those of the bundle: `mimi.weights_path`.
+    pub mimi: Option<PathBuf>,
+}
+
 /// The weights as xn-ptts loads them.
 pub struct Weights {
     pub vb: xn::nn::Path<xn::CpuDevice>,
 }
 
-/// Memory-maps the checkpoint at `path`.
-pub fn load(path: &Path) -> Result<Weights> {
-    let vb = xn::nn::VB::load_with_key_map(&[path], xn::CPU, remap_key)
-        .with_context(|| format!("cannot load the weights in {}", path.display()))?;
+/// Memory-maps the checkpoint files.
+pub fn load(files: &WeightFiles) -> Result<Weights> {
+    // The Mimi file's tensors replace the bundle's: xn-ptts loads the files in order, a later
+    // tensor of the same name replacing an earlier one, and those only the bundle has are left
+    // out.
+    let mimi_keys: Option<HashSet<String>> = match &files.mimi {
+        None => None,
+        Some(path) => {
+            let file = SafetensorsFile::open(path)?;
+            let keys: HashSet<String> = file
+                .tensors
+                .into_keys()
+                .filter(|key| key.starts_with("mimi."))
+                .collect();
+            // TODO: the Mimi checkpoints of training runs (weight-normed, `model.` keys), which
+            // `get_mimi_state_dict` converts, are not supported.
+            if keys.is_empty() {
+                bail!(
+                    "{} has no mimi.* tensors: only Mimi weights as a TTSModel holds them are supported by this binary",
+                    path.display()
+                )
+            }
+            Some(keys)
+        }
+    };
+    let (first, separate_flow_lm) = match (&files.bundle, &files.flow_lm) {
+        (Some(bundle), _) => (bundle, false),
+        (None, Some(flow_lm)) => {
+            let file = SafetensorsFile::open(flow_lm)?;
+            if let Some(key) = file
+                .tensors
+                .keys()
+                .find(|key| key.starts_with("flow_lm.") || key.starts_with("mimi."))
+            {
+                bail!(
+                    "{} is not a flow LM checkpoint: it has a tensor {key}, use it as the config's weights_path",
+                    flow_lm.display()
+                )
+            }
+            (flow_lm, true)
+        }
+        (None, None) => {
+            bail!("No weights_path specified for the TTSModel, the model would be uninitialized")
+        }
+    };
+    let mut paths = vec![first.clone()];
+    paths.extend(files.mimi.clone());
+    let key_map = move |name: &str| -> Option<String> {
+        if name.starts_with("mimi.") {
+            if mimi_keys.as_ref().is_some_and(|keys| !keys.contains(name)) {
+                return None;
+            }
+            remap_key(name)
+        } else if separate_flow_lm {
+            remap_key(&flow_lm_file_key(name)?)
+        } else {
+            remap_key(name)
+        }
+    };
+    let vb = xn::nn::VB::load_with_key_map(&paths, xn::CPU, key_map)
+        .with_context(|| format!("cannot load the weights in {paths:?}"))?;
     Ok(Weights { vb: vb.root() })
 }

@@ -7,7 +7,7 @@ use crate::defaults;
 use crate::rng::NoiseRng;
 use crate::text::{TextOptions, prepare_text_prompt, split_into_best_sentences};
 use crate::tokenizer::{SharedTokenizer, Tokenizer};
-use crate::weights::SafetensorsFile;
+use crate::weights::{SafetensorsFile, WeightFiles};
 use anyhow::{Context, Result, bail};
 use ptts::flow_lm::{FlowLMState, StepInput};
 use ptts::transformer::{LayerAttentionState, StreamingMHAState, StreamingTransformerState};
@@ -134,29 +134,41 @@ pub struct TtsModel<Q: CpuBackend> {
 impl<Q: CpuBackend> TtsModel<Q> {
     /// Port of `TTSModel.load_model`, for the config already read.
     pub fn load(config: Config, origin: Origin, options: &LoadOptions) -> Result<Self> {
-        // TODO: the separate FlowLM and Mimi checkpoints of training runs (weight-normed Mimi,
-        // un-renamed FlowLM keys) are not converted; export a single `weights_path` instead.
-        if config.flow_lm.weights_path.is_some() || config.mimi.weights_path.is_some() {
-            bail!(
-                "flow_lm.weights_path and mimi.weights_path are not supported by this binary, use a config with a single weights_path"
-            )
-        }
-        let Some(weights_path) = config.weights_path.as_deref() else {
-            bail!("No weights_path specified for the TTSModel, the model would be uninitialized")
-        };
-        log::info!("Loading TTSModel weights from {weights_path}");
+        let mut weight_files = WeightFiles::default();
         let mut has_voice_cloning = true;
-        let weights_file = match crate::download::download_if_necessary(weights_path) {
-            Ok(path) => path,
-            Err(e) => {
-                let Some(fallback) = config.weights_path_without_voice_cloning.as_deref() else {
-                    return Err(e);
-                };
-                log::debug!("falling back to the weights without voice cloning: {e:#}");
-                has_voice_cloning = false;
-                crate::download::download_if_necessary(fallback)?
+        if let Some(mimi_path) = config.mimi.weights_path.as_deref() {
+            if config.flow_lm.weights_path.is_none() && config.weights_path.is_none() {
+                bail!(
+                    "If you specify mimi.weights_path you should specify flow_lm.weights_path or weights_path"
+                )
             }
-        };
+            log::info!("Loading Mimi weights from {mimi_path}");
+            weight_files.mimi = Some(crate::download::download_if_necessary(mimi_path)?);
+        }
+        if let Some(weights_path) = config.weights_path.as_deref() {
+            log::info!("Loading TTSModel weights from {weights_path}");
+            let path = match crate::download::download_if_necessary(weights_path) {
+                Ok(path) => path,
+                Err(e) => {
+                    let Some(fallback) = config.weights_path_without_voice_cloning.as_deref()
+                    else {
+                        return Err(e);
+                    };
+                    log::debug!("falling back to the weights without voice cloning: {e:#}");
+                    has_voice_cloning = false;
+                    crate::download::download_if_necessary(fallback)?
+                }
+            };
+            weight_files.bundle = Some(path);
+        } else if let Some(flow_lm_path) = config.flow_lm.weights_path.as_deref() {
+            if weight_files.mimi.is_none() {
+                bail!("flow_lm.weights_path needs mimi.weights_path, for the Mimi weights")
+            }
+            log::info!("Loading FlowLM weights from {flow_lm_path}");
+            weight_files.flow_lm = Some(crate::download::download_if_necessary(flow_lm_path)?);
+        } else {
+            bail!("No weights_path specified for the TTSModel, the model would be uninitialized")
+        }
 
         let lookup_table = &config.flow_lm.lookup_table;
         let tokenizer = Arc::new(Tokenizer::load(
@@ -178,7 +190,7 @@ impl<Q: CpuBackend> TtsModel<Q> {
             .eos_threshold
             .unwrap_or(config.default_eos_threshold);
         let ptts_config = config.to_ptts(decode_steps, eos_threshold)?;
-        let weights = crate::weights::load(&weights_file)?;
+        let weights = crate::weights::load(&weight_files)?;
         let model = TTSModel::<Q>::load(
             &weights.vb,
             Box::new(SharedTokenizer(tokenizer.clone())),
