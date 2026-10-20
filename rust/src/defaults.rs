@@ -153,7 +153,7 @@ pub fn predefined_voice_names() -> Vec<&'static str> {
 /// The state of a predefined voice, precomputed with the released weights of `language`.
 pub fn get_predefined_voice(language: &str, name: &str) -> String {
     format!(
-        "hf://kyutai/pocket-tts-without-voice-cloning/languages/{language}/embeddings/{name}.safetensors@ab248779e0718743c013e20b2d812ace7c8f4bf7"
+        "hf://kyutai/pocket-tts-without-voice-cloning/languages/{language}/embeddings/{name}.safetensors@a3055dcb533cf2ec90458008a01e7cef550bae2a"
     )
 }
 
