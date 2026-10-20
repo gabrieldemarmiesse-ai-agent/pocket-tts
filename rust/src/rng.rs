@@ -20,8 +20,6 @@ pub struct NoiseRng {
     rng: rand::rngs::StdRng,
     normal: Normal<f32>,
     clamp: Option<f32>,
-    /// What was drawn since the last [`Self::take_drawn`].
-    drawn: Vec<f32>,
 }
 
 impl NoiseRng {
@@ -31,13 +29,7 @@ impl NoiseRng {
             rng: rand::rngs::StdRng::seed_from_u64(seed()),
             normal,
             clamp: noise_clamp,
-            drawn: Vec::new(),
         })
-    }
-
-    /// The values drawn since the previous call, in order.
-    pub fn take_drawn(&mut self) -> Vec<f32> {
-        std::mem::take(&mut self.drawn)
     }
 
     fn draw(&mut self) -> f32 {
@@ -62,9 +54,7 @@ impl NoiseRng {
 
 impl ptts::flow_lm::Rng for NoiseRng {
     fn sample(&mut self) -> f32 {
-        let value = self.draw();
-        self.drawn.push(value);
-        value
+        self.draw()
     }
 }
 
@@ -78,8 +68,6 @@ mod tests {
         let mut rng = NoiseRng::new(1.0, Some(0.5)).unwrap();
         let values: Vec<f32> = (0..1000).map(|_| rng.sample()).collect();
         assert!(values.iter().all(|v| v.abs() <= 0.5));
-        assert_eq!(rng.take_drawn(), values);
-        assert!(rng.take_drawn().is_empty());
     }
 
     #[test]

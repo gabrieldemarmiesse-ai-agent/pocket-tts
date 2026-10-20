@@ -2243,7 +2243,7 @@ dependencies = [
 [[package]]
 name = "ptts"
 version = "0.4.0-rc.3"
-source = "git+https://github.com/gradium-ai/xn-ptts?rev=1bfe079c9a4c778dbe4edd9d4d5bca9df3e46b3f#1bfe079c9a4c778dbe4edd9d4d5bca9df3e46b3f"
+source = "git+https://github.com/gabrieldemarmiesse/xn-ptts?rev=7efa26973f81bba42cf2ace8da2c1eb9b605d54d#7efa26973f81bba42cf2ace8da2c1eb9b605d54d"
 dependencies = [
  "ebur128",
  "rand 0.9.5",

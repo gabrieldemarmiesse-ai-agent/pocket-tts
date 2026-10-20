@@ -1,8 +1,9 @@
 # pocket-tts, the standalone binary
 
 A port of the `pocket-tts` CLI (`generate`, `serve`, `export-voice`) that runs without Python,
-built on the [xn-ptts](https://github.com/gradium-ai/xn-ptts) implementation of the model. The
-release workflow (`.github/workflows/rust-release.yml`) attaches its builds to every GitHub
+built on the [xn-ptts](https://github.com/gradium-ai/xn-ptts) implementation of the model,
+through [a fork](https://github.com/gabrieldemarmiesse/xn-ptts/tree/pocket-tts-small-models)
+that adds what pocket-tts models need. The release workflow (`.github/workflows/rust-release.yml`) attaches its builds to every GitHub
 release.
 
 ```bash

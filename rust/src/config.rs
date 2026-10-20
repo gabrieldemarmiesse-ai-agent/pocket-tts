@@ -5,6 +5,7 @@
 //! remote, is read with the same schema, unknown fields being an error as with pydantic.
 
 use anyhow::{Context, Result, bail};
+pub use ptts::flow_lm::FlowType;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -15,12 +16,9 @@ include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 pub struct FlowConfig {
     pub dim: usize,
     pub depth: usize,
-    #[serde(rename = "type", default = "default_flow_type")]
-    pub kind: String,
-}
-
-fn default_flow_type() -> String {
-    "lsd".to_string()
+    /// The sampler head, under the names pocket-tts gives them.
+    #[serde(rename = "type", default)]
+    pub kind: FlowType,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -171,17 +169,6 @@ fn default_temperature() -> f32 {
     0.3
 }
 
-/// The sampler head of the flow LM, from the config's `flow.type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlowType {
-    /// Lagrangian Self Distillation: two time conditions.
-    Lsd,
-    /// Optimal-transport flow matching: one time condition, Euler integration.
-    FlowMatching,
-    /// No time condition, the head maps the noise to a sample in one step.
-    Drifting,
-}
-
 /// Where a config came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
@@ -258,18 +245,8 @@ impl Config {
         Ok((config, origin))
     }
 
-    pub fn flow_type(&self) -> Result<FlowType> {
-        match self.flow_lm.flow.kind.as_str() {
-            "lsd" => Ok(FlowType::Lsd),
-            "flow_matching" => Ok(FlowType::FlowMatching),
-            "drifting" => Ok(FlowType::Drifting),
-            other => bail!("Unknown flow type: {other}"),
-        }
-    }
-
-    /// The width of the speaker latents, which the Mimi encoder's downsampling produces.
-    pub fn speaker_latent_dim(&self) -> usize {
-        self.mimi.inner_dim.unwrap_or(self.mimi.seanet.dimension)
+    pub fn flow_type(&self) -> FlowType {
+        self.flow_lm.flow.kind
     }
 
     /// The configuration is checked up front against what xn-ptts can run, so that a model it
@@ -278,8 +255,7 @@ impl Config {
         // TODO: upstream to xn-ptts (gradium-ai/xn-ptts#210), then translate these fields.
         let flow_lm = &self.flow_lm;
         let transformer = &flow_lm.transformer;
-        if flow_lm.flow.kind == "pointwise"
-            || flow_lm.z_dim.is_some()
+        if flow_lm.z_dim.is_some()
             || flow_lm.lookup_table.rank.is_some()
             || transformer.dim_feedforward.is_some()
             || transformer.attn_dim.is_some()
@@ -288,12 +264,11 @@ impl Config {
             || self.mimi.decoder_transformer.is_some()
         {
             bail!(
-                "this model uses small-model options (pointwise head, z_dim, attn_dim, num_kv_heads, \
+                "this model uses small-model options (z_dim, attn_dim, num_kv_heads, \
                  a low-rank text table, an explicit feed-forward width or a separate Mimi decoder) \
                  that the pinned xn-ptts does not support yet"
             )
         }
-        self.flow_type()?;
         let mimi = &self.mimi;
         let dimension = mimi.seanet.dimension;
         // TODO: upstream to xn-ptts. Its Mimi decoder upsamples from `dimension` channels; an
@@ -348,6 +323,7 @@ impl Config {
                 "flow_dim": flow_lm.flow.dim,
                 "flow_depth": flow_lm.flow.depth,
                 "ldim": mimi.quantizer.dimension,
+                "flow_type": flow_lm.flow.kind,
             },
             "mimi": {
                 "channels": mimi.channels,
@@ -375,6 +351,7 @@ impl Config {
                 "transformer_max_period": mimi.transformer.max_period,
                 "transformer_dim_feedforward": mimi.transformer.dim_feedforward,
                 "downsample_channel_wise": false,
+                "inner_dim": mimi.inner_dim,
             },
             "lsd_decode_steps": sampler_decode_steps,
             "eos_threshold": eos_threshold,
@@ -435,9 +412,6 @@ mod tests {
             .iter()
             .find(|(name, _)| *name == "english_drifting_26-09")
             .unwrap();
-        assert_eq!(
-            Config::parse(yaml).unwrap().flow_type().unwrap(),
-            FlowType::Drifting
-        );
+        assert_eq!(Config::parse(yaml).unwrap().flow_type(), FlowType::Drifting);
     }
 }

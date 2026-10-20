@@ -124,7 +124,6 @@ pub struct TtsModel<Q: CpuBackend> {
     tokenizer: Arc<Tokenizer>,
     text_options: TextOptions,
     has_voice_cloning: bool,
-    flow_type: FlowType,
     rng: Mutex<NoiseRng>,
     num_layers: usize,
     num_heads: usize,
@@ -134,7 +133,6 @@ pub struct TtsModel<Q: CpuBackend> {
 impl<Q: CpuBackend> TtsModel<Q> {
     /// Port of `TTSModel.load_model`, for the config already read.
     pub fn load(config: Config, origin: Origin, options: &LoadOptions) -> Result<Self> {
-        let flow_type = config.flow_type()?;
         // TODO: the separate FlowLM and Mimi checkpoints of training runs (weight-normed Mimi,
         // un-renamed FlowLM keys) are not converted; export a single `weights_path` instead.
         if config.flow_lm.weights_path.is_some() || config.mimi.weights_path.is_some() {
@@ -166,16 +164,17 @@ impl<Q: CpuBackend> TtsModel<Q> {
             &lookup_table.tokenizer,
         )?);
 
-        // The drifting head maps the noise in one step, whatever the number of steps asked.
-        let decode_steps = match flow_type {
-            FlowType::Drifting => 1,
-            _ => options.sampler_decode_steps,
+        // The drifting and pointwise heads map the noise in one step, whatever the number of
+        // steps asked.
+        let decode_steps = match config.flow_type() {
+            FlowType::Drifting | FlowType::Pointwise => 1,
+            FlowType::Lsd | FlowType::FlowMatching => options.sampler_decode_steps,
         };
         if decode_steps == 0 {
             bail!("the number of sampler decode steps must be positive")
         }
         let ptts_config = config.to_ptts(decode_steps, options.eos_threshold)?;
-        let weights = crate::weights::load(&weights_file, &config)?;
+        let weights = crate::weights::load(&weights_file)?;
         let model = TTSModel::<Q>::load(
             &weights.vb,
             Box::new(SharedTokenizer(tokenizer.clone())),
@@ -205,7 +204,6 @@ impl<Q: CpuBackend> TtsModel<Q> {
             encoder,
             tokenizer,
             has_voice_cloning,
-            flow_type,
         })
     }
 
@@ -463,13 +461,7 @@ impl<Q: CpuBackend> TtsModel<Q> {
             };
             let (latent, is_eos) = {
                 let mut rng = self.rng.lock().unwrap_or_else(|e| e.into_inner());
-                rng.take_drawn();
-                let (latent, is_eos) = self.model.generate_step(state, input, &mut *rng)?;
-                let latent = match self.flow_type {
-                    FlowType::Drifting => self.subtract_noise(&latent, &rng.take_drawn())?,
-                    FlowType::Lsd | FlowType::FlowMatching => latent,
-                };
-                (latent, is_eos)
+                self.model.generate_step(state, input, &mut *rng)?
             };
             if is_eos && eos_step.is_none() && generation_step >= MIN_FRAMES_BEFORE_EOS {
                 eos_step = Some(generation_step);
@@ -499,34 +491,6 @@ impl<Q: CpuBackend> TtsModel<Q> {
             log::info!("Average generation step time: {mean} ms");
         }
         Ok(())
-    }
-
-    // TODO: upstream to xn-ptts. Without a drifting sampler there, the head runs as one LSD step
-    // with zeroed time embeddings (see `weights.rs`), which returns `noise + head(noise)`; the
-    // drifting sample is `head(noise)`.
-    fn subtract_noise(
-        &self,
-        latent: &Tensor<Q::T, Q::B>,
-        noise: &[f32],
-    ) -> Result<Tensor<Q::T, Q::B>> {
-        let values = latent.to_vec()?;
-        if values.len() != noise.len() {
-            bail!(
-                "drew {} noise values for a latent of {}",
-                noise.len(),
-                values.len()
-            )
-        }
-        let data = values
-            .iter()
-            .zip(noise)
-            .map(|(v, n)| Q::T::from_f32(v.to_f32() - n))
-            .collect();
-        Ok(Tensor::from_vec(
-            data,
-            latent.dims().to_vec(),
-            self.model.device(),
-        )?)
     }
 
     /// Decodes the latents as they come, as many as are queued in one call, and hands the audio
