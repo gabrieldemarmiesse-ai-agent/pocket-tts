@@ -61,6 +61,8 @@ pub struct FlowLMConfig {
     pub weights_path: Option<String>,
     #[serde(default)]
     pub insert_bos_before_voice: bool,
+    /// Width of the backbone output the sampler and EOS heads read: a bias-free projection from
+    /// `d_model` when set.
     #[serde(default)]
     pub z_dim: Option<usize>,
 }
@@ -276,14 +278,13 @@ impl Config {
         // TODO: upstream to xn-ptts (gradium-ai/xn-ptts#210), then translate these fields.
         let flow_lm = &self.flow_lm;
         let transformer = &flow_lm.transformer;
-        if flow_lm.z_dim.is_some()
-            || flow_lm.lookup_table.rank.is_some()
+        if flow_lm.lookup_table.rank.is_some()
             || transformer.dim_feedforward.is_some()
             || transformer.attn_dim.is_some()
             || transformer.num_kv_heads.is_some()
         {
             bail!(
-                "this model uses small-model options (z_dim, attn_dim, num_kv_heads, \
+                "this model uses small-model options (attn_dim, num_kv_heads, \
                  a low-rank text table or an explicit feed-forward width) that the pinned xn-ptts \
                  does not support yet"
             )
@@ -400,6 +401,7 @@ impl Config {
                 "flow_depth": flow_lm.flow.depth,
                 "ldim": mimi.quantizer.dimension,
                 "flow_type": flow_lm.flow.kind,
+                "z_dim": flow_lm.z_dim,
             },
             "mimi": self.mimi_to_ptts(mimi.decoder_seanet(), mimi.decoder_transformer()),
             "lsd_decode_steps": sampler_decode_steps,
@@ -431,9 +433,7 @@ mod tests {
     use super::*;
 
     /// Embedded configs the pinned xn-ptts cannot run yet; they must fail with an explanation.
-    const SMALL_MODELS: [&str; 6] = [
-        "english_18m_2026-10",
-        "english_18m_refl_2026-10",
+    const SMALL_MODELS: [&str; 4] = [
         "english_7m_2026-10",
         "english_7m_refl_2026-10",
         "english_2m_2026-10",
