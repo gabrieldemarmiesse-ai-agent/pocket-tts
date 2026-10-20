@@ -43,7 +43,8 @@ pub struct LoadOptions {
     pub temperature: Option<f32>,
     pub sampler_decode_steps: usize,
     pub noise_clamp: Option<f32>,
-    pub eos_threshold: f32,
+    /// The config's `default_eos_threshold` when `None`.
+    pub eos_threshold: Option<f32>,
 }
 
 impl Default for LoadOptions {
@@ -52,7 +53,7 @@ impl Default for LoadOptions {
             temperature: None,
             sampler_decode_steps: defaults::DEFAULT_SAMPLER_DECODE_STEPS,
             noise_clamp: None,
-            eos_threshold: defaults::DEFAULT_EOS_THRESHOLD,
+            eos_threshold: None,
         }
     }
 }
@@ -173,7 +174,10 @@ impl<Q: CpuBackend> TtsModel<Q> {
         if decode_steps == 0 {
             bail!("the number of sampler decode steps must be positive")
         }
-        let ptts_config = config.to_ptts(decode_steps, options.eos_threshold)?;
+        let eos_threshold = options
+            .eos_threshold
+            .unwrap_or(config.default_eos_threshold);
+        let ptts_config = config.to_ptts(decode_steps, eos_threshold)?;
         let weights = crate::weights::load(&weights_file)?;
         let model = TTSModel::<Q>::load(
             &weights.vb,

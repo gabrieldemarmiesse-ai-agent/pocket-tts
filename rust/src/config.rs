@@ -155,10 +155,9 @@ pub struct Config {
     pub model_recommended_frames_after_eos: Option<usize>,
     #[serde(default = "default_temperature")]
     pub default_temperature: f32,
-    /// Unused: only the small models set it, and they are rejected until xn-ptts supports them.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub default_eos_threshold: Option<f32>,
+    /// The EOS threshold when the caller does not pass one.
+    #[serde(default = "default_eos_threshold")]
+    pub default_eos_threshold: f32,
 }
 
 fn default_true() -> bool {
@@ -167,6 +166,10 @@ fn default_true() -> bool {
 
 fn default_temperature() -> f32 {
     0.3
+}
+
+fn default_eos_threshold() -> f32 {
+    crate::defaults::DEFAULT_EOS_THRESHOLD
 }
 
 /// Where a config came from.
@@ -397,6 +400,22 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name}: {e:#}"));
         }
         assert!(available_languages().contains(&"english"));
+    }
+
+    fn english_with(extra: &str) -> Result<Config> {
+        let (_, yaml) = CONFIGS.iter().find(|(name, _)| *name == "english").unwrap();
+        Config::parse(&format!("{yaml}\n{extra}\n"))
+    }
+
+    #[test]
+    fn the_eos_threshold_defaults_to_the_python_one() {
+        let config = english_with("").unwrap();
+        assert_eq!(
+            config.default_eos_threshold,
+            crate::defaults::DEFAULT_EOS_THRESHOLD
+        );
+        let config = english_with("default_eos_threshold: -1.0").unwrap();
+        assert_eq!(config.default_eos_threshold, -1.0);
     }
 
     #[test]

@@ -116,9 +116,9 @@ struct GenerateArgs {
     /// Noise clamp value
     #[arg(long, allow_negative_numbers = true)]
     noise_clamp: Option<f32>,
-    /// EOS threshold
-    #[arg(long, default_value_t = defaults::DEFAULT_EOS_THRESHOLD, allow_negative_numbers = true)]
-    eos_threshold: f32,
+    /// EOS threshold. Defaults to the model's value from its config (-4.0).
+    #[arg(long, allow_negative_numbers = true)]
+    eos_threshold: Option<f32>,
     /// Number of frames to generate after EOS
     #[arg(long)]
     frames_after_eos: Option<usize>,
