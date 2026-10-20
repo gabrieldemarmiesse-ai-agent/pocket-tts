@@ -31,10 +31,23 @@ pub struct FlowLMTransformerConfig {
     pub num_layers: usize,
     #[serde(default)]
     pub dim_feedforward: Option<usize>,
+    /// Width of the queries and of the attention output, `d_model` when `None`.
     #[serde(default)]
     pub attn_dim: Option<usize>,
+    /// Key/value heads, each shared by `num_heads / num_kv_heads` query heads, `num_heads` when
+    /// `None`.
     #[serde(default)]
     pub num_kv_heads: Option<usize>,
+}
+
+impl FlowLMTransformerConfig {
+    pub fn num_kv_heads(&self) -> usize {
+        self.num_kv_heads.unwrap_or(self.num_heads)
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.attn_dim.unwrap_or(self.d_model) / self.num_heads
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -278,15 +291,10 @@ impl Config {
         // TODO: upstream to xn-ptts (gradium-ai/xn-ptts#210), then translate these fields.
         let flow_lm = &self.flow_lm;
         let transformer = &flow_lm.transformer;
-        if flow_lm.lookup_table.rank.is_some()
-            || transformer.dim_feedforward.is_some()
-            || transformer.attn_dim.is_some()
-            || transformer.num_kv_heads.is_some()
-        {
+        if flow_lm.lookup_table.rank.is_some() || transformer.dim_feedforward.is_some() {
             bail!(
-                "this model uses small-model options (attn_dim, num_kv_heads, \
-                 a low-rank text table or an explicit feed-forward width) that the pinned xn-ptts \
-                 does not support yet"
+                "this model uses small-model options (a low-rank text table or an \
+                 explicit feed-forward width) that the pinned xn-ptts does not support yet"
             )
         }
         let mimi = &self.mimi;
@@ -402,6 +410,8 @@ impl Config {
                 "ldim": mimi.quantizer.dimension,
                 "flow_type": flow_lm.flow.kind,
                 "z_dim": flow_lm.z_dim,
+                "attn_dim": flow_lm.transformer.attn_dim,
+                "num_kv_heads": flow_lm.transformer.num_kv_heads,
             },
             "mimi": self.mimi_to_ptts(mimi.decoder_seanet(), mimi.decoder_transformer()),
             "lsd_decode_steps": sampler_decode_steps,

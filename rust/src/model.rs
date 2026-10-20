@@ -73,7 +73,7 @@ impl<Q: CpuBackend> VoiceState<Q> {
     }
 
     /// Writes the state as the Python package's `export_model_state` does: per attention layer,
-    /// `{module}/cache` of shape `[2, batch, time, heads, dim]` and `{module}/offset`.
+    /// `{module}/cache` of shape `[2, batch, time, kv_heads, dim]` and `{module}/offset`.
     pub fn export(&self, path: &Path) -> Result<()> {
         let mut tensors: Vec<(String, safetensors::Dtype, Vec<usize>, Vec<u8>)> = Vec::new();
         for (i, layer) in self.transformer_state.layer_states.iter().enumerate() {
@@ -127,8 +127,8 @@ pub struct TtsModel<Q: CpuBackend> {
     has_voice_cloning: bool,
     rng: Mutex<NoiseRng>,
     num_layers: usize,
-    num_heads: usize,
-    d_model: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
 }
 
 impl<Q: CpuBackend> TtsModel<Q> {
@@ -210,8 +210,8 @@ impl<Q: CpuBackend> TtsModel<Q> {
         let transformer = &config.flow_lm.transformer;
         Ok(Self {
             num_layers: transformer.num_layers,
-            num_heads: transformer.num_heads,
-            d_model: transformer.d_model,
+            num_kv_heads: transformer.num_kv_heads(),
+            head_dim: transformer.head_dim(),
             text_options: TextOptions::from_config(&config),
             rng: Mutex::new(NoiseRng::new(temperature, options.noise_clamp)?),
             config,
@@ -293,7 +293,8 @@ impl<Q: CpuBackend> TtsModel<Q> {
         let voice = VoiceState {
             transformer_state: state.flow_lm_state.transformer_state,
         };
-        let size = 2 * self.num_layers * voice.len() * self.d_model * std::mem::size_of::<f32>();
+        let kv_dim = self.num_kv_heads * self.head_dim;
+        let size = 2 * self.num_layers * voice.len() * kv_dim * std::mem::size_of::<f32>();
         log::info!(
             "Size of the model state for audio prompt: {} MB",
             size / 1_000_000
@@ -304,7 +305,7 @@ impl<Q: CpuBackend> TtsModel<Q> {
     /// Reads a state written by `export-voice`, from this binary or the Python package.
     fn import_state(&self, path: &Path) -> Result<VoiceState<Q>> {
         let file = SafetensorsFile::open(path)?;
-        let dim_per_head = self.d_model / self.num_heads;
+        let dim_per_head = self.head_dim;
         let mut layer_states = Vec::with_capacity(self.num_layers);
         for i in 0..self.num_layers {
             let module = format!("transformer.layers.{i}.self_attn");
@@ -319,10 +320,10 @@ impl<Q: CpuBackend> TtsModel<Q> {
             let [2, b, capacity, h, d] = shape[..] else {
                 bail!("{cache_name} has shape {shape:?}, expected [2, batch, time, heads, dim]")
             };
-            if b != 1 || h != self.num_heads || d != dim_per_head {
+            if b != 1 || h != self.num_kv_heads || d != dim_per_head {
                 bail!(
                     "{cache_name} has shape {shape:?}, this model needs [2, 1, _, {}, {dim_per_head}]",
-                    self.num_heads
+                    self.num_kv_heads
                 )
             }
             // States written before the offset was stored hold the position in the length of
