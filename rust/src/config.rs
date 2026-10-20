@@ -57,6 +57,7 @@ pub struct LookupTable {
     pub n_bins: usize,
     pub tokenizer: String,
     pub tokenizer_path: String,
+    /// A low-rank table: `rank`-wide embeddings and a bias-free projection to `dim`.
     #[serde(default)]
     pub rank: Option<usize>,
 }
@@ -291,10 +292,10 @@ impl Config {
         // TODO: upstream to xn-ptts (gradium-ai/xn-ptts#210), then translate these fields.
         let flow_lm = &self.flow_lm;
         let transformer = &flow_lm.transformer;
-        if flow_lm.lookup_table.rank.is_some() || transformer.dim_feedforward.is_some() {
+        if transformer.dim_feedforward.is_some() {
             bail!(
-                "this model uses small-model options (a low-rank text table or an \
-                 explicit feed-forward width) that the pinned xn-ptts does not support yet"
+                "this model uses an explicit feed-forward width, which the pinned \
+                 xn-ptts does not support yet"
             )
         }
         let mimi = &self.mimi;
@@ -412,6 +413,7 @@ impl Config {
                 "z_dim": flow_lm.z_dim,
                 "attn_dim": flow_lm.transformer.attn_dim,
                 "num_kv_heads": flow_lm.transformer.num_kv_heads,
+                "lut_rank": flow_lm.lookup_table.rank,
             },
             "mimi": self.mimi_to_ptts(mimi.decoder_seanet(), mimi.decoder_transformer()),
             "lsd_decode_steps": sampler_decode_steps,
@@ -443,19 +445,14 @@ mod tests {
     use super::*;
 
     /// Embedded configs the pinned xn-ptts cannot run yet; they must fail with an explanation.
-    const SMALL_MODELS: [&str; 4] = [
-        "english_7m_2026-10",
-        "english_7m_refl_2026-10",
-        "english_2m_2026-10",
-        "english_2m_refl_2026-10",
-    ];
+    const SMALL_MODELS: [&str; 2] = ["english_2m_2026-10", "english_2m_refl_2026-10"];
 
     #[test]
     fn every_embedded_config_parses_and_translates() {
         for (name, yaml) in CONFIGS {
             if SMALL_MODELS.contains(name) {
                 let err = Config::parse(yaml).expect_err(name).to_string();
-                assert!(err.contains("small-model options"), "{name}: {err}");
+                assert!(err.contains("feed-forward width"), "{name}: {err}");
                 continue;
             }
             let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{name}: {e:#}"));
