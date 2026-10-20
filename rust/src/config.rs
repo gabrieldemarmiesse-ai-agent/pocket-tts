@@ -125,10 +125,28 @@ pub struct MimiConfig {
     pub inner_dim: Option<usize>,
     #[serde(default)]
     pub outer_dim: Option<usize>,
+    /// The decoder's SEANet and transformer, when they differ from the encoder's.
     #[serde(default)]
     pub decoder_seanet: Option<SEANetConfig>,
     #[serde(default)]
     pub decoder_transformer: Option<MimiTransformerConfig>,
+}
+
+impl MimiConfig {
+    pub fn decoder_seanet(&self) -> &SEANetConfig {
+        self.decoder_seanet.as_ref().unwrap_or(&self.seanet)
+    }
+
+    pub fn decoder_transformer(&self) -> &MimiTransformerConfig {
+        self.decoder_transformer
+            .as_ref()
+            .unwrap_or(&self.transformer)
+    }
+
+    /// Whether the decoder has its own dims, which xn-ptts then loads with a config of its own.
+    fn has_own_decoder(&self) -> bool {
+        self.decoder_seanet.is_some() || self.decoder_transformer.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -263,39 +281,57 @@ impl Config {
             || transformer.dim_feedforward.is_some()
             || transformer.attn_dim.is_some()
             || transformer.num_kv_heads.is_some()
-            || self.mimi.decoder_seanet.is_some()
-            || self.mimi.decoder_transformer.is_some()
         {
             bail!(
                 "this model uses small-model options (z_dim, attn_dim, num_kv_heads, \
-                 a low-rank text table, an explicit feed-forward width or a separate Mimi decoder) \
-                 that the pinned xn-ptts does not support yet"
+                 a low-rank text table or an explicit feed-forward width) that the pinned xn-ptts \
+                 does not support yet"
             )
         }
         let mimi = &self.mimi;
-        let dimension = mimi.seanet.dimension;
-        // TODO: upstream to xn-ptts. Its Mimi decoder upsamples from `dimension` channels; an
-        // `outer_dim` (the `in_dimension` of `ConvTrUpsample1d`) other than that needs support
-        // in `MimiConfig`.
+        let decoder_dimension = mimi.decoder_seanet().dimension;
+        // TODO: upstream to xn-ptts. Its Mimi decoder upsamples from as many channels as it
+        // decodes; an `outer_dim` (the `in_dimension` of `ConvTrUpsample1d`) other than that
+        // needs support in `MimiConfig`.
         if mimi
             .outer_dim
-            .is_some_and(|outer_dim| outer_dim != dimension)
+            .is_some_and(|outer_dim| outer_dim != decoder_dimension)
         {
-            bail!("mimi.outer_dim different from mimi.seanet.dimension is not supported")
+            bail!("mimi.outer_dim different from the decoder's seanet dimension is not supported")
         }
-        // TODO: upstream to xn-ptts. Its SEANet always pads with zeros.
-        if mimi.seanet.pad_mode != "constant" {
-            bail!(
-                "mimi.seanet.pad_mode {:?} is not supported",
-                mimi.seanet.pad_mode
-            )
+        for (name, seanet) in [
+            ("seanet", &mimi.seanet),
+            ("decoder_seanet", mimi.decoder_seanet()),
+        ] {
+            // TODO: upstream to xn-ptts. Its SEANet always pads with zeros.
+            if seanet.pad_mode != "constant" {
+                bail!(
+                    "mimi.{name}.pad_mode {:?} is not supported",
+                    seanet.pad_mode
+                )
+            }
+            if seanet.channels != 1 {
+                bail!("only mono Mimi models are supported")
+            }
         }
-        if mimi.transformer.input_dimension != dimension
-            || mimi.transformer.output_dimensions != [dimension]
-        {
-            bail!("the Mimi transformer must map mimi.seanet.dimension to itself")
+        if mimi.decoder_seanet().ratios != mimi.seanet.ratios {
+            bail!("mimi.decoder_seanet.ratios must be those of mimi.seanet")
         }
-        if mimi.channels != 1 || mimi.seanet.channels != 1 {
+        for (name, transformer, dimension) in [
+            ("transformer", &mimi.transformer, mimi.seanet.dimension),
+            (
+                "decoder_transformer",
+                mimi.decoder_transformer(),
+                decoder_dimension,
+            ),
+        ] {
+            if transformer.input_dimension != dimension
+                || transformer.output_dimensions != [dimension]
+            {
+                bail!("mimi.{name} must map its seanet dimension to itself")
+            }
+        }
+        if mimi.channels != 1 {
             bail!("only mono Mimi models are supported")
         }
         for key in self.replace_characters.keys() {
@@ -304,6 +340,43 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// The `MimiConfig` of xn-ptts for a SEANet and a transformer of `self.mimi`.
+    fn mimi_to_ptts(
+        &self,
+        seanet: &SEANetConfig,
+        transformer: &MimiTransformerConfig,
+    ) -> serde_json::Value {
+        let mimi = &self.mimi;
+        serde_json::json!({
+            "channels": mimi.channels,
+            "sample_rate": mimi.sample_rate,
+            "frame_rate": mimi.frame_rate,
+            "dimension": seanet.dimension,
+            "quantizer_dimension": mimi.quantizer.dimension,
+            "quantizer_output_dimension": mimi.quantizer.output_dimension,
+            "n_filters": seanet.n_filters,
+            "n_residual_layers": seanet.n_residual_layers,
+            "ratios": seanet.ratios,
+            "kernel_size": seanet.kernel_size,
+            "last_kernel_size": seanet.last_kernel_size,
+            "residual_kernel_size": seanet.residual_kernel_size,
+            "dilation_base": seanet.dilation_base,
+            "compress": seanet.compress,
+            "transformer_d_model": transformer.d_model,
+            "transformer_num_heads": transformer.num_heads,
+            "transformer_num_layers": transformer.num_layers,
+            "transformer_layer_scale": transformer.layer_scale,
+            // pocket-tts (and moshi) count the current key in the `context` keys a query attends
+            // to, where xn-ptts counts the `context` positions before it: one less is the same
+            // window.
+            "transformer_context": transformer.context.saturating_sub(1),
+            "transformer_max_period": transformer.max_period,
+            "transformer_dim_feedforward": transformer.dim_feedforward,
+            "downsample_channel_wise": false,
+            "inner_dim": mimi.inner_dim,
+        })
     }
 
     /// The `config.json` of xn-ptts that describes the same model.
@@ -328,38 +401,19 @@ impl Config {
                 "ldim": mimi.quantizer.dimension,
                 "flow_type": flow_lm.flow.kind,
             },
-            "mimi": {
-                "channels": mimi.channels,
-                "sample_rate": mimi.sample_rate,
-                "frame_rate": mimi.frame_rate,
-                "dimension": mimi.seanet.dimension,
-                "quantizer_dimension": mimi.quantizer.dimension,
-                "quantizer_output_dimension": mimi.quantizer.output_dimension,
-                "n_filters": mimi.seanet.n_filters,
-                "n_residual_layers": mimi.seanet.n_residual_layers,
-                "ratios": mimi.seanet.ratios,
-                "kernel_size": mimi.seanet.kernel_size,
-                "last_kernel_size": mimi.seanet.last_kernel_size,
-                "residual_kernel_size": mimi.seanet.residual_kernel_size,
-                "dilation_base": mimi.seanet.dilation_base,
-                "compress": mimi.seanet.compress,
-                "transformer_d_model": mimi.transformer.d_model,
-                "transformer_num_heads": mimi.transformer.num_heads,
-                "transformer_num_layers": mimi.transformer.num_layers,
-                "transformer_layer_scale": mimi.transformer.layer_scale,
-                // TODO: upstream to xn-ptts. Its Mimi attention reaches `context` positions back,
-                // which is `context + 1` keys with the current one, where pocket-tts (and moshi)
-                // attend to `context` keys in all. One less gives the same window.
-                "transformer_context": mimi.transformer.context.saturating_sub(1),
-                "transformer_max_period": mimi.transformer.max_period,
-                "transformer_dim_feedforward": mimi.transformer.dim_feedforward,
-                "downsample_channel_wise": false,
-                "inner_dim": mimi.inner_dim,
-            },
+            "mimi": self.mimi_to_ptts(mimi.decoder_seanet(), mimi.decoder_transformer()),
             "lsd_decode_steps": sampler_decode_steps,
             "eos_threshold": eos_threshold,
             "model_id": null,
         });
+        if mimi.has_own_decoder() {
+            // xn-ptts encodes the voice prompt with `speaker_mimi` when it is set and decodes
+            // with `mimi`: the encoder's config goes there, under the same weight prefix.
+            config["speaker_mimi"] = serde_json::json!({
+                "prefix": "mimi",
+                "mimi": self.mimi_to_ptts(&mimi.seanet, &mimi.transformer),
+            });
+        }
         if flow_lm.insert_bos_before_voice {
             // pocket-tts prepends `bos_before_voice` to the voice embedding, which is what a
             // `speaker_wavs` prefix sink does in xn-ptts: `[empty text, sink, voice]`. The check
