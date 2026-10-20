@@ -29,8 +29,6 @@ pub struct FlowLMTransformerConfig {
     pub d_model: usize,
     pub num_heads: usize,
     pub num_layers: usize,
-    #[serde(default)]
-    pub dim_feedforward: Option<usize>,
     /// Width of the queries and of the attention output, `d_model` when `None`.
     #[serde(default)]
     pub attn_dim: Option<usize>,
@@ -38,6 +36,9 @@ pub struct FlowLMTransformerConfig {
     /// `None`.
     #[serde(default)]
     pub num_kv_heads: Option<usize>,
+    /// Hidden width of the feed-forward layers, `d_model * hidden_scale` when `None`.
+    #[serde(default)]
+    pub dim_feedforward: Option<usize>,
 }
 
 impl FlowLMTransformerConfig {
@@ -47,6 +48,11 @@ impl FlowLMTransformerConfig {
 
     pub fn head_dim(&self) -> usize {
         self.attn_dim.unwrap_or(self.d_model) / self.num_heads
+    }
+
+    pub fn dim_feedforward(&self) -> usize {
+        self.dim_feedforward
+            .unwrap_or(self.d_model * self.hidden_scale)
     }
 }
 
@@ -289,15 +295,6 @@ impl Config {
     /// The configuration is checked up front against what xn-ptts can run, so that a model it
     /// cannot represent fails with an explanation rather than a shape mismatch.
     fn validate(&self) -> Result<()> {
-        // TODO: upstream to xn-ptts (gradium-ai/xn-ptts#210), then translate these fields.
-        let flow_lm = &self.flow_lm;
-        let transformer = &flow_lm.transformer;
-        if transformer.dim_feedforward.is_some() {
-            bail!(
-                "this model uses an explicit feed-forward width, which the pinned \
-                 xn-ptts does not support yet"
-            )
-        }
         let mimi = &self.mimi;
         let decoder_dimension = mimi.decoder_seanet().dimension;
         // TODO: upstream to xn-ptts. Its Mimi decoder upsamples from as many channels as it
@@ -402,7 +399,7 @@ impl Config {
                 "d_model": flow_lm.transformer.d_model,
                 "num_heads": flow_lm.transformer.num_heads,
                 "num_layers": flow_lm.transformer.num_layers,
-                "dim_feedforward": flow_lm.transformer.d_model * flow_lm.transformer.hidden_scale,
+                "dim_feedforward": flow_lm.transformer.dim_feedforward(),
                 "max_period": flow_lm.transformer.max_period,
                 "n_bins": flow_lm.lookup_table.n_bins,
                 "lut_dim": flow_lm.lookup_table.dim,
@@ -444,17 +441,9 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// Embedded configs the pinned xn-ptts cannot run yet; they must fail with an explanation.
-    const SMALL_MODELS: [&str; 2] = ["english_2m_2026-10", "english_2m_refl_2026-10"];
-
     #[test]
     fn every_embedded_config_parses_and_translates() {
         for (name, yaml) in CONFIGS {
-            if SMALL_MODELS.contains(name) {
-                let err = Config::parse(yaml).expect_err(name).to_string();
-                assert!(err.contains("feed-forward width"), "{name}: {err}");
-                continue;
-            }
             let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{name}: {e:#}"));
             config
                 .to_ptts(1, -4.0)
@@ -477,6 +466,50 @@ mod tests {
         );
         let config = english_with("default_eos_threshold: -1.0").unwrap();
         assert_eq!(config.default_eos_threshold, -1.0);
+    }
+
+    #[test]
+    fn the_small_model_options_reach_xn_ptts() {
+        let (_, yaml) = CONFIGS.iter().find(|(name, _)| *name == "english").unwrap();
+        let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let options = serde_yaml::from_str::<serde_yaml::Value>(
+            "{type: pointwise, attn_dim: 192, num_kv_heads: 1, dim_feedforward: 96, rank: 32}",
+        )
+        .unwrap();
+        let flow_lm = &mut value["flow_lm"];
+        flow_lm["flow"]["type"] = options["type"].clone();
+        flow_lm["z_dim"] = 64.into();
+        for key in ["attn_dim", "num_kv_heads", "dim_feedforward"] {
+            flow_lm["transformer"][key] = options[key].clone();
+        }
+        flow_lm["lookup_table"]["rank"] = options["rank"].clone();
+        let mut decoder_seanet = value["mimi"]["seanet"].clone();
+        decoder_seanet["dimension"] = 128.into();
+        value["mimi"]["decoder_seanet"] = decoder_seanet;
+        value["mimi"]["decoder_transformer"] = serde_yaml::from_str(
+            "{d_model: 128, num_heads: 4, num_layers: 4, layer_scale: 0.01, context: 50, \
+             dim_feedforward: 384, input_dimension: 128, output_dimensions: [128]}",
+        )
+        .unwrap();
+        value["mimi"]["outer_dim"] = 128.into();
+
+        let config = Config::parse(&serde_yaml::to_string(&value).unwrap()).unwrap();
+        let ptts = config.to_ptts(1, -1.0).unwrap();
+        let f = &ptts.flow_lm;
+        assert_eq!(f.flow_type, FlowType::Pointwise);
+        assert_eq!(
+            (f.z_dim, f.attn_dim, f.num_kv_heads),
+            (Some(64), Some(192), Some(1))
+        );
+        assert_eq!((f.dim_feedforward, f.lut_rank), (96, Some(32)));
+        // The decoder's dims go to `mimi`, the encoder's to `speaker_mimi`.
+        assert_eq!(ptts.mimi.dimension, 128);
+        assert_eq!(ptts.mimi.transformer_context, 49);
+        let speaker_mimi = ptts.speaker_mimi.as_ref().unwrap();
+        assert_eq!(
+            (speaker_mimi.prefix.as_str(), speaker_mimi.mimi.dimension),
+            ("mimi", 512)
+        );
     }
 
     #[test]
